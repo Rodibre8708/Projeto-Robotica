@@ -1,1 +1,426 @@
-
+#include <SoftwareSerial.h>
+#include "DHT.h"
+ 
+// ------------------ Configurações ------------------
+#define DHTPIN 7
+#define DHTTYPE DHT11
+#define BT_STATE_PIN 6  // Conecte o pino STATE do HC-05
+ 
+DHT dht(DHTPIN, DHTTYPE);
+SoftwareSerial bluetooth(10, 11); // RX, TX
+ 
+// ------------------ Estrutura de Conquistas ------------------
+struct Conquista {
+  const char* nome;
+  const char* descricao;
+  bool desbloqueada;
+};
+ 
+#define NUM_CONQUISTAS 5
+Conquista conquistas[NUM_CONQUISTAS];
+ 
+// ------------------ Estrutura de Perfil (com Gamificação) ------------------
+struct Perfil {
+  int idade;
+  int peso;
+  int altura;
+  char sexo;
+  // --- Gamificação ---
+  long pontosXP;
+  int nivel;
+  int coposDeAgua;
+};
+ 
+Perfil perfil;
+bool perfilCriado = false;
+bool sistemaAtivo = true;
+bool mensagemDesligadoEnviada = false;
+bool metaBatidaMensagemEnviada = false; // Flag para a mensagem de meta batida
+ 
+// ------------------ Controle de Estado ------------------
+enum Estado {
+  MENU_PRINCIPAL,
+  CONSULTANDO_SENSORES,
+  CRIANDO_PERFIL,
+  MONITORANDO_INGESTAO,
+  PAINEL_ESTATISTICAS,
+  MOSTRANDO_CONQUISTAS,
+  MOSTRANDO_MASCOTE,
+  ENCERRADO
+};
+ 
+Estado estadoAtual = MENU_PRINCIPAL;
+ 
+int etapaColeta = 0;
+float mlMeta = 0;
+float mlIngerido = 0;
+ 
+// ------------------ Conexão e Keep-alive ------------------
+bool estavaConectado = false;
+unsigned long ultimoComandoMillis = 0;
+unsigned long intervaloKeepAlive = 120000; // 2 minutos
+ 
+// ------------------ Setup ------------------
+void setup() {
+  Serial.begin(9600);
+  bluetooth.begin(9600);
+  pinMode(BT_STATE_PIN, INPUT);
+  dht.begin();
+  inicializarConquistas();
+}
+ 
+// ------------------ Loop Principal ------------------
+void loop() {
+  bool conectadoAgora = digitalRead(BT_STATE_PIN);
+ 
+  if (conectadoAgora && !estavaConectado) {
+    Serial.println(F("Bluetooth conectado!"));
+    reiniciarSistema();
+    delay(200);
+    mostrarMenu();
+    ultimoComandoMillis = millis();
+  }
+  estavaConectado = conectadoAgora;
+ 
+  if (!conectadoAgora) return;
+ 
+  if (millis() - ultimoComandoMillis > intervaloKeepAlive) {
+    bluetooth.println("");
+    ultimoComandoMillis = millis();
+  }
+ 
+  if (!sistemaAtivo) {
+    if (!mensagemDesligadoEnviada) {
+      mensagemDesligadoEnviada = true;
+    }
+    return;
+  }
+ 
+  if (!bluetooth.available()) return;
+ 
+  String comando = bluetooth.readStringUntil('\n');
+  comando.trim();
+  comando.toUpperCase();
+  ultimoComandoMillis = millis();
+ 
+  if (comando == "0") {
+    estadoAtual = MENU_PRINCIPAL;
+    mostrarMenu();
+    return;
+  }
+ 
+  switch (estadoAtual) {
+    case MENU_PRINCIPAL:
+      handleMenuPrincipal(comando);
+      break;
+    case CRIANDO_PERFIL:
+      handleCriandoPerfil(comando);
+      break;
+    case MONITORANDO_INGESTAO:
+      handleMonitorandoIngestao(comando);
+      break;
+    default:
+      break;
+  }
+}
+ 
+// ------------------ Handlers de Estado ------------------
+void handleMenuPrincipal(String comando) {
+  if (comando == "1") {
+    estadoAtual = CONSULTANDO_SENSORES;
+    mostrarTemperaturaUmidade();
+    if (!conquistas[1].desbloqueada) {
+      conquistas[1].desbloqueada = true;
+      bluetooth.println(F(">> Conquista Desbloqueada: Curioso! <<"));
+    }
+  } else if (comando == "2") {
+    if (!perfilCriado) {
+      estadoAtual = CRIANDO_PERFIL;
+      bluetooth.println(F("Criando perfil..."));
+      bluetooth.println(F("Digite sua idade:"));
+      etapaColeta = 0;
+    } else {
+      bluetooth.println(F("Perfil ja criado. Use a opcao 3 para acessar."));
+    }
+  } else if (comando == "3") {
+    if (perfilCriado) {
+      estadoAtual = MONITORANDO_INGESTAO;
+      bluetooth.println(F("Monitorando ingestao de agua..."));
+      mostrarProgresso();
+    } else {
+      bluetooth.println(F("Nenhum perfil criado. Use a opcao 2."));
+    }
+  } else if (comando == "4") {
+    estadoAtual = PAINEL_ESTATISTICAS;
+    mostrarPainel();
+  } else if (comando == "5") {
+    estadoAtual = MOSTRANDO_CONQUISTAS;
+    mostrarConquistas();
+  } else if (comando == "6") {
+    estadoAtual = MOSTRANDO_MASCOTE;
+    mostrarMascote();
+  } else if (comando == "7") {
+    bluetooth.println(F("Sistema desligado. Desconecte o Bluetooth."));
+    sistemaAtivo = false;
+    estadoAtual = ENCERRADO;
+  } else {
+    bluetooth.println(F("Opcao invalida."));
+  }
+}
+ 
+void handleCriandoPerfil(String comando) {
+  switch (etapaColeta) {
+    case 0:
+      perfil.idade = comando.toInt();
+      bluetooth.println(F("Digite seu peso (kg):"));
+      etapaColeta++;
+      break;
+    case 1:
+      perfil.peso = comando.toInt();
+      bluetooth.println(F("Digite seu sexo (M/F):"));
+      etapaColeta++;
+      break;
+    case 2:
+      perfil.sexo = comando.charAt(0);
+      bluetooth.println(F("Digite sua altura (cm):"));
+      etapaColeta++;
+      break;
+    case 3:
+      perfil.altura = comando.toInt();
+      perfilCriado = true;
+      calcularMetaHidratacao();
+      bluetooth.println(F("Perfil criado com sucesso!"));
+      if (!conquistas[0].desbloqueada) {
+        conquistas[0].desbloqueada = true;
+        bluetooth.println(F(">> Conquista Desbloqueada: Perfil Criado! <<"));
+      }
+      estadoAtual = MENU_PRINCIPAL;
+      mostrarMenu();
+      break;
+  }
+}
+ 
+void handleMonitorandoIngestao(String comando) {
+  if (comando == "1") {
+    int mlAdicionado = 300;
+    mlIngerido += mlAdicionado;
+    perfil.coposDeAgua++;
+    atualizarXP(mlAdicionado);
+    checarNivel();
+    verificarConquistas();
+    mostrarProgresso();
+  } else {
+    bluetooth.println(F("Comando nao reconhecido. '1' para copo, '0' para voltar."));
+  }
+}
+ 
+// ------------------ Funções de Gamificação ------------------
+void atualizarXP(int mlAdicionado) {
+  int xpGanhos = mlAdicionado / 10;
+  perfil.pontosXP += xpGanhos;
+  bluetooth.print(F("Voce ganhou "));
+  bluetooth.print(xpGanhos);
+  bluetooth.println(F(" XP!"));
+}
+ 
+void checarNivel() {
+  long xpParaProximoNivel = perfil.nivel * 100;
+  if (perfil.pontosXP >= xpParaProximoNivel) {
+    perfil.nivel++;
+    perfil.pontosXP -= xpParaProximoNivel;
+    bluetooth.println(F("---------------------------------"));
+    bluetooth.print(F("PARABENS! Voce subiu para o Nivel "));
+    bluetooth.println(perfil.nivel);
+    bluetooth.println(F("---------------------------------"));
+  }
+}
+ 
+void inicializarConquistas() {
+  conquistas[0] = {"Perfil Criado", "Voce se cadastrou no sistema.", false};
+  conquistas[1] = {"Curioso", "Voce verificou os sensores.", false};
+  conquistas[2] = {"O Primeiro Gole", "Voce bebeu seu primeiro copo.", false};
+  conquistas[3] = {"Meta Batida!", "Voce atingiu sua meta diaria.", false};
+  conquistas[4] = {"Super Hidratado", "Voce ultrapassou a meta em 500ml.", false};
+}
+ 
+void verificarConquistas() {
+  if (perfil.coposDeAgua == 1 && !conquistas[2].desbloqueada) {
+    conquistas[2].desbloqueada = true;
+    bluetooth.println(F(">> Conquista Desbloqueada: O Primeiro Gole! <<"));
+  }
+  if (mlIngerido >= mlMeta && !conquistas[3].desbloqueada) {
+    conquistas[3].desbloqueada = true;
+    bluetooth.println(F(">> Conquista Desbloqueada: Meta Batida! <<"));
+  }
+  if (mlIngerido >= (mlMeta + 500) && !conquistas[4].desbloqueada) {
+    conquistas[4].desbloqueada = true;
+    bluetooth.println(F(">> Conquista Desbloqueada: Super Hidratado! <<"));
+  }
+}
+ 
+// ------------------ Funções de Exibição ------------------
+void mostrarMenu() {
+  bluetooth.println(F("\n---- Menu Principal ----"));
+  bluetooth.println(F("1 - Temperatura e Umidade"));
+  bluetooth.println(F("2 - Criar perfil"));
+  bluetooth.println(F("3 - Monitorar ingestao de agua"));
+  bluetooth.println(F("4 - Painel de Estatisticas"));
+  bluetooth.println(F("5 - Ver Conquistas"));
+  bluetooth.println(F("6 - Ver Mascote"));
+  bluetooth.println(F("7 - Desligar"));
+  bluetooth.println(F("Escolha uma opcao (1-7):"));
+}
+ 
+void mostrarPainel() {
+  if (!perfilCriado) {
+    bluetooth.println(F("Crie um perfil primeiro (Opcao 2)."));
+    bluetooth.println(F("Digite 0 para voltar."));
+    return;
+  }
+  bluetooth.println(F("\n--- Painel de Estatisticas da Sessao ---"));
+  bluetooth.print(F("Nivel: "));
+  bluetooth.println(perfil.nivel);
+  bluetooth.print(F("XP: "));
+  bluetooth.print(perfil.pontosXP);
+  bluetooth.print(F("/"));
+  bluetooth.print(perfil.nivel * 100);
+  bluetooth.println(F(" XP para o proximo nivel"));
+  bluetooth.print(F("Total ingerido: "));
+  bluetooth.print(mlIngerido);
+  bluetooth.println(F(" ml"));
+  bluetooth.print(F("Copos de agua: "));
+  bluetooth.println(perfil.coposDeAgua);
+ 
+  int conquistasDesbloqueadas = 0;
+  for(int i = 0; i < NUM_CONQUISTAS; i++){
+    if(conquistas[i].desbloqueada) conquistasDesbloqueadas++;
+  }
+  bluetooth.print(F("Conquistas: "));
+  bluetooth.print(conquistasDesbloqueadas);
+  bluetooth.print(F("/"));
+  bluetooth.println(NUM_CONQUISTAS);
+  bluetooth.println(F("\nDigite 0 para voltar ao menu."));
+}
+ 
+void mostrarConquistas() {
+   bluetooth.println(F("\n--- Minhas Conquistas ---"));
+   for(int i = 0; i < NUM_CONQUISTAS; i++){
+     bluetooth.print(conquistas[i].nome);
+     bluetooth.print(F(" - "));
+     if (conquistas[i].desbloqueada) {
+       bluetooth.print(F("[X] "));
+     } else {
+       bluetooth.print(F("[ ] "));
+     }
+     bluetooth.println(conquistas[i].descricao);
+   }
+   bluetooth.println(F("\nDigite 0 para voltar ao menu."));
+}
+ 
+void mostrarMascote() {
+  float percentualMeta = 0;
+  if(mlMeta > 0) {
+    percentualMeta = (mlIngerido / mlMeta) * 100;
+  }
+ 
+  bluetooth.println(F("\n--- Meu Mascote da Hidratacao ---"));
+ 
+  if (percentualMeta >= 120) {
+    bluetooth.println(F("STATUS: Radiante! *\\(O_O)/*"));
+    bluetooth.println(F("Obrigado! Estou transbordando de felicidade!"));
+  } else if (percentualMeta >= 100) {
+    bluetooth.println(F("STATUS: Super Feliz! \\(^o^)/"));
+    bluetooth.println(F("Meta batida! Voce e incrivel!"));
+  } else if (percentualMeta >= 75) {
+    bluetooth.println(F("STATUS: Feliz (^_^)" ));
+    bluetooth.println(F("Estou me sentindo otimo, quase la!"));
+  } else if (percentualMeta >= 25) {
+    bluetooth.println(F("STATUS: Normal (._.)"));
+    bluetooth.println(F("Um copo de agua viria a calhar..."));
+  } else {
+    bluetooth.println(F("STATUS: Com sede (T_T)"));
+    bluetooth.println(F("Preciso de agua, por favor!"));
+  }
+  bluetooth.println(F("\nDigite 0 para voltar ao menu."));
+}
+ 
+void mostrarTemperaturaUmidade() {
+  float temperatura = dht.readTemperature();
+  float umidade = dht.readHumidity();
+  if (isnan(temperatura) || isnan(umidade)) {
+    bluetooth.println(F("Erro ao ler os sensores."));
+  } else {
+    bluetooth.print(F("Temperatura: "));
+    bluetooth.print(temperatura);
+    bluetooth.println(F(" C"));
+    bluetooth.print(F("Umidade: "));
+    bluetooth.print(umidade);
+    bluetooth.println(F(" %"));
+  }
+  bluetooth.println(F("Digite 0 para voltar ao menu."));
+}
+ 
+void calcularMetaHidratacao() {
+  float temperatura = dht.readTemperature();
+  float umidade = dht.readHumidity();
+  mlMeta = perfil.peso * 35;
+  if (!isnan(temperatura)) {
+    if (temperatura > 30) mlMeta += 500;
+    else if (temperatura < 20) mlMeta -= 300;
+  }
+  if (!isnan(umidade)) {
+    if (umidade < 40) mlMeta += 400;
+    else if (umidade > 70) mlMeta -= 200;
+  }
+  if (mlMeta < 1500) mlMeta = 1500;
+  mlIngerido = 0;
+ 
+  bluetooth.print(F("Meta diaria de ingestao: "));
+  bluetooth.print(mlMeta);
+  bluetooth.println(F(" ml"));
+ 
+  if (!isnan(temperatura) && !isnan(umidade)) {
+    bluetooth.print(F("(Baseado em T:"));
+    bluetooth.print(temperatura);
+    bluetooth.print(F("C, U:"));
+    bluetooth.print(umidade);
+    bluetooth.println(F("%)"));
+  }
+}
+ 
+void mostrarProgresso() {
+  bluetooth.print(F("Progresso: "));
+  bluetooth.print(mlIngerido);
+  bluetooth.print(F("ml / "));
+  bluetooth.print(mlMeta);
+  bluetooth.println(F("ml"));
+ 
+  if (mlIngerido >= mlMeta) {
+    if (!metaBatidaMensagemEnviada) {
+      bluetooth.println(F("Parabens! Voce atingiu sua meta diaria."));
+      metaBatidaMensagemEnviada = true;
+    }
+  }
+ 
+  bluetooth.println(F("Mais um copo? (Digite '1' para validar 300 ml)"));
+  bluetooth.println(F("Digite 0 para voltar ao menu."));
+}
+ 
+void reiniciarSistema() {
+  perfilCriado = false;
+  estadoAtual = MENU_PRINCIPAL;
+  etapaColeta = 0;
+  mlMeta = 0;
+  mlIngerido = 0;
+  mensagemDesligadoEnviada = false;
+  sistemaAtivo = true;
+  metaBatidaMensagemEnviada = false; // Reseta a flag da mensagem
+ 
+  perfil.pontosXP = 0;
+  perfil.nivel = 1;
+  perfil.coposDeAgua = 0;
+  inicializarConquistas();
+}
+ 
+ 
+ 
